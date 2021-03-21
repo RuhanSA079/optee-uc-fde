@@ -51,6 +51,9 @@
 #define FDE_JSON_HANDLE            "handle"
 #define FDE_JSON_RESULT_FEATURES   "{\"features\":[]}"
 
+// old interface
+#define FDE_JSON_MODELS            "models"
+
 // helper wrapper around mbedtls_base64_encode function
 char *basee64_encode(const unsigned char *in_buf, size_t in_buf_len) {
     int ret = EXIT_SUCCESS;
@@ -103,6 +106,31 @@ unsigned char *basee64_decode(const char *in_buf, size_t in_buf_len, size_t *buf
         decoded_buffer = NULL;
     }
     return decoded_buffer;
+}
+
+unsigned char * decode_byte_array(json_object* byte_array, size_t *buf_len) {
+    int len;
+    int i;
+    unsigned char *bytes;
+    json_object *array_object;
+    len = json_object_array_length(byte_array);
+    bytes = (char *)malloc(len);
+    if (!bytes) {
+        ree_log(REE_ERROR, "decode_byte_array failed allock fail");
+        return NULL;
+    }
+    for (i = 0; i < len ;++i) {
+      array_object = json_object_array_get_idx(byte_array, i);
+      if ( json_type_int == json_object_get_type (array_object)){
+          bytes[i] = (unsigned char)json_object_get_int(json_object_array_get_idx(byte_array, i));
+      } else {
+          ree_log(REE_ERROR, "Array element is not int!!");
+          free(bytes);
+          return NULL;
+      }
+    }
+    *buf_len = len;
+    return bytes;
 }
 
 static void print_help(void)
@@ -189,6 +217,7 @@ char *get_reveal_key_request() {
 
 int handle_operation_reveal(struct json_object *request_json) {
     int ret = EXIT_SUCCESS;
+    int remove_me_hook_version = 1;
     struct json_object *j_key = NULL;
     struct json_object *j_handle = NULL;
     struct json_object *j_key_name = NULL;
@@ -208,17 +237,22 @@ int handle_operation_reveal(struct json_object *request_json) {
     j_ret = json_object_object_get_ex(request_json,
                                       FDE_JSON_SEALED_KEY,
                                       &j_key);
-    if ((j_ret != TRUE) ||
-        (json_type_string != json_object_get_type(j_key))
-       ) {
+    if (j_ret != TRUE) {
         ree_log(REE_ERROR, "sealed key json malformed[%d]", j_ret);
         ret = EXIT_FAILURE;
         goto cleanup;
     }
-    sealed_key_buf = basee64_decode(json_object_get_string(j_key),
+    if (json_type_string == json_object_get_type(j_key)) {
+        sealed_key_buf = basee64_decode(json_object_get_string(j_key),
                                     strlen(json_object_get_string(j_key)),
                                     &sealed_key_buf_len);
-
+    } else if (json_type_array == json_object_get_type(j_key)) {
+        // this is old API
+        remove_me_hook_version = 0;
+        sealed_key_buf = decode_byte_array(j_key, &sealed_key_buf_len);
+    } else {
+        ree_log(REE_ERROR, "key is neither string or array [%d]", json_object_get_type(j_key));
+    }
     if (!sealed_key_buf){
         ree_log(REE_ERROR, "failed to decode sealed key from base64");
         ret = EXIT_FAILURE;
@@ -228,24 +262,22 @@ int handle_operation_reveal(struct json_object *request_json) {
     j_ret = json_object_object_get_ex(request_json,
                                       FDE_JSON_HANDLE,
                                       &j_handle);
-    if ((j_ret != TRUE) ||
-        (json_type_string != json_object_get_type(j_handle))
+    if ((j_ret == TRUE) ||
+        (json_type_string == json_object_get_type(j_handle))
        ) {
-       ree_log(REE_ERROR, "handle json malformed[%d]", j_ret);
-       ret = EXIT_FAILURE;
-       goto cleanup;
-    }
-    handle_buf = basee64_decode(json_object_get_string(j_handle),
+        handle_buf = basee64_decode(json_object_get_string(j_handle),
                                strlen(json_object_get_string(j_handle)),
                                &handle_buf_len);
-    if (!handle_buf) {
-           ree_log(REE_ERROR, "failed to decode key handle base64");
-           ret = EXIT_FAILURE;
-           goto cleanup;
-    }
+        if (!handle_buf) {
+            ree_log(REE_ERROR, "failed to decode key handle base64");
+            ret = EXIT_FAILURE;
+            goto cleanup;
+        }
 
+    }
     j_ret = json_object_object_get_ex(request_json,
-                                      FDE_JSON_SEALED_KEY_NAME,
+                                      (handle_buf ? FDE_JSON_SEALED_KEY_NAME
+                                                  : FDE_JSON_KEY_NAME),
                                       &j_key_name);
     if ((j_ret != TRUE)||
         (json_type_string != json_object_get_type(j_key_name))
@@ -254,6 +286,22 @@ int handle_operation_reveal(struct json_object *request_json) {
         ret = EXIT_FAILURE;
         goto cleanup;
     }
+
+    // OLD HOOK API support
+    // if we have no handle, use key name as handle
+    if (!handle_buf) {
+        // use key name as handle, this is old version of the hook
+        remove_me_hook_version = 0;
+        handle_buf_len = strlen(json_object_get_string(j_key_name));
+        handle_buf = malloc(handle_buf_len);
+        if (!handle_buf){
+            ree_log(REE_ERROR, "failed to allock handle buf for key-name");
+            ret = EXIT_FAILURE;
+            goto cleanup;
+        }
+        strncpy(handle_buf, json_object_get_string(j_key_name), handle_buf_len);
+    }
+    // END of OLD HOOK API support
 
     // call crypto operation
     unsealed_key_buf_len = MAX_BUF_SIZE;
@@ -275,6 +323,16 @@ int handle_operation_reveal(struct json_object *request_json) {
         ree_log(REE_ERROR, "Key decrypt crypto operation failed: 0x%X", ret);
         goto cleanup;
     }
+
+    // OLD HOOK API support
+    // if old hook version, print revealed key directly to stdout
+    if (!remove_me_hook_version) {
+        // handling old key API
+        fwrite(unsealed_key_buf, unsealed_key_buf_len, 1, stdout);
+        fflush(stdout);
+        goto cleanup;
+    }
+    // END of OLD HOOK API support
 
     unsealed_key = basee64_encode(unsealed_key_buf, unsealed_key_buf_len);
     if (!unsealed_key) {
@@ -321,6 +379,7 @@ int handle_operation_lock() {
 
 int handle_operation_setup(struct json_object *request_json) {
     int ret = EXIT_SUCCESS;
+    int remove_me_hook_version = 1;
     struct json_object *j_key = NULL;
     struct json_object *j_key_name = NULL;
     struct json_object *j_models = NULL;
@@ -344,16 +403,22 @@ int handle_operation_setup(struct json_object *request_json) {
     j_ret = json_object_object_get_ex(request_json,
                                       FDE_JSON_KEY,
                                       &j_key);
-    if ((j_ret != TRUE) ||
-        ((json_type_string != json_object_get_type(j_key)))
-       ) {
+    if (j_ret != TRUE) {
         ree_log(REE_ERROR, "request json is missing key[%d]", j_ret);
         ret = EXIT_FAILURE;
         goto cleanup;
     }
-    unsealed_key_buf = basee64_decode(json_object_get_string(j_key),
-                                      strlen(json_object_get_string(j_key)),
-                                      &unsealed_key_buf_len);
+    if (json_type_string == json_object_get_type(j_key)) {
+        unsealed_key_buf = basee64_decode(json_object_get_string(j_key),
+                                          strlen(json_object_get_string(j_key)),
+                                          &unsealed_key_buf_len);
+    } else if (json_type_array == json_object_get_type(j_key)) {
+        // this is old API
+        remove_me_hook_version = 0;
+        unsealed_key_buf = decode_byte_array(j_key, &unsealed_key_buf_len);
+    } else {
+        ree_log(REE_ERROR, "key is neither string or array [%d]", json_object_get_type(j_key));
+    }
     if (!unsealed_key_buf) {
         ree_log(REE_ERROR, "failed to decode unsealed key");
         ret = EXIT_FAILURE;
@@ -372,14 +437,38 @@ int handle_operation_setup(struct json_object *request_json) {
         goto cleanup;
     }
 
+    // OLD HOOK API support
+        // check if request have model field -> old hook API ->use key name as handle
+        j_ret = json_object_object_get_ex(request_json,
+                                          FDE_JSON_MODELS,
+                                          &j_models);
+        if (j_ret == TRUE) {
+            remove_me_hook_version = 0;
+        }
+
     // generate handle
-    handle_buf_len = KEY_HANDLE_BUF_SIZE;
-    handle_buf = generate_rng(handle_buf_len);
-    if (!handle_buf) {
+    if (remove_me_hook_version) {
+    // END of OLD HOOK API support
+        handle_buf_len = KEY_HANDLE_BUF_SIZE;
+        handle_buf = generate_rng(handle_buf_len);
+        if (!handle_buf) {
         ree_log(REE_ERROR, "Failed to generate random handle");
-        ret = EXIT_FAILURE;
-        goto cleanup;
+            ret = EXIT_FAILURE;
+            goto cleanup;
+        }
+    // OLD HOOK API support
+    } else {
+        // use key name as handle
+        handle_buf  = malloc(handle_buf_len);
+        if (!handle_buf){
+            ree_log(REE_ERROR, "Handle buf alloc failed");
+            ret = EXIT_FAILURE;
+            goto cleanup;
+        }
+        handle_buf_len = strlen(json_object_get_string(j_key_name));
+        strncpy(handle_buf, json_object_get_string(j_key_name), handle_buf_len);
     }
+    // END of OLD HOOK API support
 
     // encrypt key
     sealed_key_buf_len = MAX_BUF_SIZE;
@@ -398,6 +487,13 @@ int handle_operation_setup(struct json_object *request_json) {
                      &sealed_key_buf_len);
     if (ret) {
         ree_log(REE_ERROR, "Key encrypt crypto operation failed: 0x%X", ret);
+        goto cleanup;
+    }
+
+    if (!remove_me_hook_version) {
+        //old hook version
+        // pass result back as raw buffer
+        set_fde_setup_request_result(sealed_key_buf, sealed_key_buf_len);
         goto cleanup;
     }
 
@@ -518,6 +614,10 @@ int handle_fde_operation(char *request_str) {
  *         - request: { "op": "reveal", "sealed-key": "base64-encoded-bytes",
  *                 "handle": "base64-encoded-bytes", "sealed-key-name": "string"}
  *         - result: {"key": "base64-encoded-bytes"}
+ *       old version:
+ *         - request: { "op": "reveal", "sealed-key": "base64-encoded-bytes",
+ *                 "sealed-key-name": "string"}
+ *         - result: "base64 encoded key"
  *     - lock:
  *         - request: { "op": "lock" }
  *         - result:
@@ -531,6 +631,12 @@ int handle_fde_operation(char *request_str) {
  *              "key-name" : "string"}
  *       - result: {"encrypted-key": "base64-encoded-bytes",
  *               "handle": "base64-encoded-bytes"}
+ *      old version:
+ *       - request: {"op": "initial-setup","key": "base64-encoded-bytes",
+ *               "key-name" : "string", “models”: []}
+ *       - result: "base64-encoded-bytes"
+ *
+ *
  */
 int main(int argc, char *argv[]) {
     int ret = EXIT_SUCCESS;
