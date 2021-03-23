@@ -154,6 +154,7 @@ unsigned char *generate_rng(size_t len) {
 }
 
 void ree_log(int log_level, const char *format, ...) {
+    TEEC_Operation operation;
     va_list args;
     char buf[2048];
 
@@ -164,4 +165,13 @@ void ree_log(int log_level, const char *format, ...) {
     vsnprintf(buf, sizeof(buf), format, args);
     va_end(args);
     fprintf(stderr, "%s\n", buf);
+    memset(&operation, 0x0, sizeof(operation));
+    operation.started = 1;
+    operation.paramTypes = TEEC_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                            TEE_PARAM_TYPE_NONE,
+                                            TEE_PARAM_TYPE_NONE,
+                                            TEE_PARAM_TYPE_NONE);
+    operation.params[0].tmpref.size = strlen(buf);
+    operation.params[0].tmpref.buffer = buf;
+    invode_command(TA_CMD_DEBUG, &operation);
 }

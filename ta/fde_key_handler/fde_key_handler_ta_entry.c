@@ -29,6 +29,18 @@ static TEE_Result lock_ta( uint32_t param_types,
 static TEE_Result get_ta_lock( uint32_t param_types,
                                TEE_Param params[TEE_NUM_PARAMS]);
 
+static TEE_Result print_debug( uint32_t paramTypes,
+                              TEE_Param params[TEE_NUM_PARAMS]) {
+
+   if (paramTypes != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                    TEE_PARAM_TYPE_NONE,
+                                    TEE_PARAM_TYPE_NONE,
+                                    TEE_PARAM_TYPE_NONE))
+      return TEE_ERROR_BAD_PARAMETERS;
+
+  DLOG("FDE_TA:REE_LOG: %s\n",(char *)params[0].memref.buffer);
+  return TEE_SUCCESS;
+}
 
 TEE_Result TA_CreateEntryPoint(void) {
     DMSG("fde_key_handler: TA_CreateEntryPoint\n");
@@ -78,6 +90,8 @@ TEE_Result TA_InvokeCommandEntryPoint( void __maybe_unused *session_context,
       	  	return get_ta_lock(paramTypes, params);
         case TA_CMD_GEN_RANDOM:
             return generate_random(paramTypes, params);
+        case TA_CMD_DEBUG:
+            return print_debug(paramTypes, params);
         default:
             EMSG("Command ID %#"PRIx32" is not supported", cmd_id);
             return TEE_ERROR_NOT_SUPPORTED;

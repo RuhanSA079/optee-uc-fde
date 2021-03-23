@@ -287,6 +287,7 @@ int handle_operation_reveal(struct json_object *request_json) {
         goto cleanup;
     }
 
+    ree_log(REE_INFO, "key-name: %s", json_object_get_string(j_key_name));
     // OLD HOOK API support
     // if we have no handle, use key name as handle
     if (!handle_buf) {
@@ -668,6 +669,7 @@ int main(int argc, char *argv[]) {
             ree_log(REE_ERROR, "main: empty request string");
             ret = EXIT_FAILURE;
         }
+        ree_log(REE_DEBUG, "main: request handled with: %d", ret);
         // handle systemd bug when returning too fast can take down systempd, ups
         usleep(100000);
         return ret;

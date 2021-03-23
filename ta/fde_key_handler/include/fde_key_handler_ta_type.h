@@ -82,6 +82,8 @@
  */
 #define TA_CMD_GEN_RANDOM             5U
 
+#define TA_CMD_DEBUG                  6U
+
 /* Define the debug flag */
 #define DEBUG
 #define DLOG    MSG_RAW
