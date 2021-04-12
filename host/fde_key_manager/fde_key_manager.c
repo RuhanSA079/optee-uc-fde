@@ -669,7 +669,7 @@ int main(int argc, char *argv[]) {
             ret = EXIT_FAILURE;
         }
         // handle systemd bug when returning too fast can take down systempd, ups
-        usleep(100000);
+        usleep(500000);
         return ret;
     }
 
