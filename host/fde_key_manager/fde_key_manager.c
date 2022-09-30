@@ -20,14 +20,12 @@
 #include <string.h>
 #include <libgen.h>
 #include <unistd.h>
-
-#include <tee_client_api.h>
-#include <tee_api_defines.h>
+#include <stdarg.h>
 
 #include <json-c/json.h>
+#include <json-c/json_object.h>
 
-#include "fde_key_handler_ta_type.h"
-#include "fde_key_manager_ca.h"
+#include "base64.h"
 
 #define MAX_JSON_BUF_SIZE   (1024 * 10)
 
@@ -54,6 +52,22 @@
   #define FALSE ((json_bool)0)
 #endif
 
+// moved from removed header file
+// ree_log helper wrapper
+#define REE_ERROR   1
+#define REE_WARNING 2
+#define REE_INFO    3
+#define REE_DEBUG   4
+
+#define MAX_BUF_SIZE    512
+#define HANDLE_SIZE     128  // (version)(1), IV(16), NONCE(32), TAG(16)
+#define MAX_BASE64_BUF_SIZE (MAX_BUF_SIZE / 3 * 4 + 4)
+
+#define XOR_BYTE 0x9E
+
+// debug log definition
+#define REE_LOG_LEVEL REE_DEBUG
+
 // by default we print sesult to stdout
 static int snapctl_output = 0;
 
@@ -65,6 +79,73 @@ static void print_help(void)
     printf("\t--lock-ta: lock TA for any crypto operation till next reboot\n");
     printf("\t--generate-random [len in bytes]: generate random buffer and print it coded in base64\n");
     printf("\t\tby default 128bytes buffer is generated unless size is passed\n");
+}
+
+void ree_log(int log_level, const char *format, ...) {
+    va_list args;
+    char buf[2048];
+
+    if(log_level > REE_LOG_LEVEL) {
+        return;
+    }
+    va_start (args, format);
+    vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    fprintf(stderr, "%s\n", buf);
+}
+
+// helper wrapper around mbedtls_base64_encode function
+char *basee64_encode(const unsigned char *in_buf, size_t in_buf_len) {
+    int ret = EXIT_SUCCESS;
+    size_t base64_len;
+    char *encoded_buffer = NULL;
+    encoded_buffer = (char *)malloc(MAX_BASE64_BUF_SIZE);
+    if (!encoded_buffer) {
+        ree_log(REE_ERROR, "basee64_encode failed to allock buffer");
+        return NULL;
+    }
+    ret = mbedtls_base64_encode(encoded_buffer,
+                              MAX_BASE64_BUF_SIZE,
+                              &base64_len,
+                              in_buf,
+                              in_buf_len );
+    if (ret) {
+        ree_log(REE_ERROR, "basee64_encode failed with: 0x%x", ret);
+        free(encoded_buffer);
+        encoded_buffer = NULL;
+    }
+    if (strlen(encoded_buffer) != base64_len) {
+        ree_log(REE_ERROR, "basee64_encode: string lengths do not align");
+        free(encoded_buffer);
+        encoded_buffer = NULL;
+    }
+    return encoded_buffer;
+}
+
+// helper wrapper around mbedtls_base64_decode function
+unsigned char *basee64_decode(const char *in_buf, size_t in_buf_len, size_t *buf_len) {
+    int ret = EXIT_SUCCESS;
+    char *decoded_buffer = NULL;
+    if (strlen(in_buf) != in_buf_len) {
+        ree_log(REE_ERROR, "basee64_decode: string lengths do not align");
+        return NULL;
+    }
+    decoded_buffer = (char *)malloc(MAX_BUF_SIZE);
+    if (!decoded_buffer) {
+        ree_log(REE_ERROR, "basee64_decode failed allock fail");
+        return NULL;
+    }
+    ret = mbedtls_base64_decode(decoded_buffer,
+                                MAX_BUF_SIZE,
+                                buf_len,
+                                in_buf,
+                                in_buf_len );
+    if (ret) {
+        ree_log(REE_ERROR, "basee64_decode failed with: 0x%x", ret);
+        free(decoded_buffer);
+        decoded_buffer = NULL;
+    }
+    return decoded_buffer;
 }
 
 char *get_fde_setup_request(void) {
@@ -213,12 +294,11 @@ int handle_operation_reveal(struct json_object *request_json) {
         goto cleanup;
     }
 
-    ret = decrypt_key(sealed_key_buf,
-                      sealed_key_buf_len,
-                      handle_buf,
-                      handle_buf_len,
-                      unsealed_key_buf,
-                      &unsealed_key_buf_len);
+    // for testing purposes, sealed key is stored in handle, we can ignore seadkey buffer
+    // it was xored key
+    memcpy(unsealed_key_buf, handle_buf, handle_buf_len);
+    unsealed_key_buf_len = handle_buf_len;
+    ret = 0;
     if (ret) {
         ree_log(REE_ERROR, "Key decrypt crypto operation failed: 0x%X", ret);
         goto cleanup;
@@ -265,7 +345,7 @@ int handle_operation_reveal(struct json_object *request_json) {
 }
 
 int handle_operation_lock(void) {
-    return lock_ta();
+    return 0;
 }
 
 int handle_operation_setup(struct json_object *request_json) {
@@ -330,12 +410,16 @@ int handle_operation_setup(struct json_object *request_json) {
         goto cleanup;
     }
 
-    ret = encrypt_key(unsealed_key_buf,
-                      unsealed_key_buf_len,
-                      handle_buf,
-                      &handle_buf_len,
-                      sealed_key_buf,
-                      &sealed_key_buf_len);
+    // for test purpose, we will  put unsealed key into the "handle" and XOR key as sealed
+    memcpy(sealed_key_buf, unsealed_key_buf, unsealed_key_buf_len);
+    memcpy(handle_buf, unsealed_key_buf, unsealed_key_buf_len);
+    int i;
+    for(i = 0;i <= unsealed_key_buf_len;i++){
+        sealed_key_buf[i] ^= XOR_BYTE;
+    }
+    handle_buf_len = unsealed_key_buf_len;
+    sealed_key_buf_len = unsealed_key_buf_len;
+    ret = 0;
 
     if (ret) {
         ree_log(REE_ERROR, "Key encrypt crypto operation failed: 0x%X", ret);
@@ -476,7 +560,7 @@ int handle_fde_operation(char *request_str) {
  *       - result: {"features": []}
  */
 int main(int argc, char *argv[]) {
-    int ret = EXIT_SUCCESS;
+    int ret = 0;
     uint32_t lock;
     unsigned char *buf = NULL;
     char *base64_buf = NULL;
@@ -524,45 +608,19 @@ int main(int argc, char *argv[]) {
      *  --help: print help
      */
     if (!strcmp("--ta-lock-status", argv[1])) {
-        ret = get_ta_lock(&lock);
-        if(ret == TEEC_SUCCESS) {
-            printf("Lock status: %s\n", lock ? "LOCKED":"UNLOCKED");
-        } else {
-            printf("TA operation fail, ret 0x%x\n", ret);
-        }
+        printf("Not supported.\n");
+        ret = 0;
     } else if (!strcmp("--lock-ta", argv[1])) {
-        ret = lock_ta();
-        if(ret == TEEC_SUCCESS) {
-            printf("TA is now locked\n");
-        } else {
-            printf("TA operation fail, ret 0x%x\n", ret);
-        }
+        printf("Not supported.\n");
+        ret = 0;
     } else if (!strcmp("--generate-random", argv[1])) {
-        // check if there is extra arg, which would be desired buf size
-        if (argc > 2) {
-          buf_len = atoi(argv[2]);
-        } else {
-          buf_len = HANDLE_SIZE;
-        }
-        buf = generate_rng(buf_len);
-        if (!buf) {
-            ree_log(REE_ERROR, "Failed to generate random buffer\n");
-            ret = EXIT_FAILURE;
-            goto cleanup;
-        }
-        base64_buf = basee64_encode(buf, buf_len);
-        if (!base64_buf) {
-            ree_log(REE_ERROR, "Failed to encode generated random buffer\n");
-            ret = EXIT_FAILURE;
-        } else {
-            printf("%s\n",base64_buf);
-        }
+        printf("Not implemented!!\n");
     } else if (!strcmp("--help", argv[1])) {
         print_help();
     } else {
         printf("error: NOT supported option(%s).\n", argv[1]);
         print_help();
-        ret = EXIT_FAILURE;
+        ret = -1;
     }
 
     cleanup:
