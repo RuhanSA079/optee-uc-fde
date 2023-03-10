@@ -43,7 +43,7 @@
 #define FDE_JSON_KEY_NAME          "key-name"
 #define FDE_JSON_SEALED_KEY        "sealed-key"
 #define FDE_JSON_HANDLE            "handle"
-#define FDE_JSON_RESULT_FEATURES   "{\"features\":[]}"
+#define FDE_JSON_RESULT_FEATURES   "{\"features\":[\"inline-crypto-engine\"]}"
 
 #if !defined(TRUE)
   #define TRUE ((json_bool)1)
